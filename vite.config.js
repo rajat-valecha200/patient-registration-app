@@ -8,4 +8,8 @@ export default defineConfig({
     react(), 
     tailwindcss()
   ],
+  assetsInclude: ['**/*.wasm'],
+    optimizeDeps: {
+    exclude: ['@electric-sql/pglite'],
+  },
 })
