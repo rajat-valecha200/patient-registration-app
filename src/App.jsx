@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback } from "react";
-// import { getPgliteInstance } from './pgliteInstance';
 import "./Styles.css";
 
 function App() {
@@ -20,8 +19,8 @@ function App() {
     address: "",
   });
 
-  const SYNC_CHANNEL = "patient-db-sync-v3";
-  const BROADCAST_CHANNEL = "patient-db-broadcast";
+  // Use a single channel name for both broadcast and storage sync
+  const SYNC_CHANNEL = "patient-db-sync-v4";
 
   const refreshPatients = useCallback(async (db) => {
     try {
@@ -38,11 +37,16 @@ function App() {
     let isMounted = true;
     let dbInstance = null;
     let broadcastChannel = null;
+    let isInitializing = false;
+
     const initializeDatabase = async (retries = 3) => {
+      if (isInitializing) return;
+      isInitializing = true;
+      
       try {
         console.log("Fetching fresh WASM...");
         const response = await fetch("/pglite.wasm", { cache: "no-store" });
-        const wasmBinary = await response.arrayBuffer(); // must be fresh
+        const wasmBinary = await response.arrayBuffer();
 
         console.log("Creating new PGlite instance...");
         const { PGlite } = await import("@electric-sql/pglite");
@@ -56,17 +60,17 @@ function App() {
 
         console.log("Creating patients table...");
         await dbInstance.query(`
-      CREATE TABLE IF NOT EXISTS patients (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        age INTEGER NOT NULL,
-        gender TEXT NOT NULL,
-        email TEXT,
-        phone TEXT,
-        address TEXT,
-        registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+          CREATE TABLE IF NOT EXISTS patients (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            age INTEGER NOT NULL,
+            gender TEXT NOT NULL,
+            email TEXT,
+            phone TEXT,
+            address TEXT,
+            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          )
+        `);
 
         if (isMounted) {
           setPglite(dbInstance);
@@ -85,6 +89,8 @@ function App() {
             setIsDbReady(false);
           }
         }
+      } finally {
+        isInitializing = false;
       }
     };
 
@@ -96,11 +102,7 @@ function App() {
     };
 
     const setupBroadcastChannel = () => {
-      if (broadcastChannel) {
-        broadcastChannel.close(); // Close any existing channel
-      }
-
-      broadcastChannel = new BroadcastChannel(BROADCAST_CHANNEL);
+      broadcastChannel = new BroadcastChannel(SYNC_CHANNEL);
 
       const handleBroadcastMessage = async (event) => {
         if (event.data?.type === "db-update" && dbInstance) {
@@ -112,28 +114,48 @@ function App() {
       broadcastChannel.addEventListener("message", handleBroadcastMessage);
 
       return () => {
-        console.log("Cleaning up broadcast channel...");
         broadcastChannel.removeEventListener("message", handleBroadcastMessage);
-        broadcastChannel.close();
       };
     };
 
-    const cleanupBroadcast = setupBroadcastChannel();
-    window.addEventListener("storage", handleStorageChange);
-    initializeDatabase();
+    // Initialize database and set up synchronization
+    const init = async () => {
+      await initializeDatabase();
+      setupBroadcastChannel();
+      window.addEventListener("storage", handleStorageChange);
+    };
+
+    init();
 
     return () => {
       isMounted = false;
       window.removeEventListener("storage", handleStorageChange);
-      cleanupBroadcast();
-      if (broadcastChannel) broadcastChannel.close();
-      if (dbInstance) dbInstance.close().catch(console.error);
+      if (broadcastChannel) {
+        broadcastChannel.close();
+      }
+      if (dbInstance) {
+        dbInstance.close().catch(console.error);
+      }
     };
   }, [refreshPatients]);
+
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     setFormData((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const notifyOtherTabs = () => {
+    // Use both localStorage and BroadcastChannel for maximum reliability
+    localStorage.setItem(SYNC_CHANNEL, Date.now().toString());
+    
+    try {
+      const channel = new BroadcastChannel(SYNC_CHANNEL);
+      channel.postMessage({ type: "db-update" });
+      setTimeout(() => channel.close(), 100); // Close after short delay
+    } catch (err) {
+      console.error("Error using BroadcastChannel:", err);
+    }
   };
 
   const handleSubmit = async (e) => {
@@ -162,13 +184,9 @@ function App() {
         phone: "",
         address: "",
       });
+      
       await refreshPatients(pglite);
-
-      localStorage.setItem(SYNC_CHANNEL, Date.now().toString());
-      const newBroadcastChannel = new BroadcastChannel(BROADCAST_CHANNEL);
-      newBroadcastChannel.postMessage({ type: "db-update" });
-      newBroadcastChannel.close();
-
+      notifyOtherTabs();
       alert("Patient registered successfully!");
     } catch (err) {
       console.error("Error registering patient:", err);
@@ -216,7 +234,7 @@ function App() {
     );
   }
 
-  return (
+    return (
     <div className="app">
       <header>
         <h1>Patient Registration System</h1>
